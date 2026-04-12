@@ -1,6 +1,45 @@
-// WebSocket-Verbindung zum Ontime-Server
-const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host + '/ws');
+const isSecure = window.location.protocol === 'https:';
+const userProvidedSocketUrl = `${isSecure ? 'wss' : 'ws'}://${window.location.host}${getStageHash()}/ws`;
 
+connectSocket();
+
+let reconnectTimeout;
+const reconnectInterval = 1000;
+let reconnectAttempts = 0;
+
+function connectSocket(socketUrl = userProvidedSocketUrl) {
+  const websocket = new WebSocket(socketUrl);
+
+  websocket.onopen = () => {
+    clearTimeout(reconnectTimeout);
+    reconnectAttempts = 0;
+    console.warn('WebSocket connected');
+  };
+
+  websocket.onclose = () => {
+    console.warn('WebSocket disconnected');
+    reconnectTimeout = setTimeout(() => {
+      console.warn(`WebSocket: attempting reconnect ${reconnectAttempts}`);
+      if (websocket && websocket.readyState === WebSocket.CLOSED) {
+        reconnectAttempts += 1;
+        connectSocket();
+      }
+    }, reconnectInterval);
+  };
+
+  websocket.onerror = (error) => {
+    console.error('WebSocket error:', error);
+  };
+
+  websocket.onmessage = (event) => {
+    const { tag, payload } = JSON.parse(event.data);
+    if (tag === 'runtime-data') {
+      handleOntimePayload(payload);
+    }
+  };
+}
+
+// DOM-Elemente
 const projectEl      = document.getElementById('projekttitel');
 const clockEl        = document.getElementById('clock');
 const mainTimerEl    = document.getElementById('timer');
@@ -17,12 +56,12 @@ const closeDetailBtn = document.getElementById('closeDetailBtn');
 const timerWrapper   = document.querySelector('.timer');
 const auxWrapper     = document.querySelector('.aux-timer');
 
-let lastClockMs       = 0;
-let eventActive       = false;
-let currentEventData  = null;
-let nextEventData     = null;
+let lastClockMs      = 0;
+let eventActive      = false;
+let currentEventData = null;
+let nextEventData    = null;
 
-// —– Feld‐Liste nur mit den gewünschten Keys —–
+// Feld-Liste für die Detail-Ansicht
 const detailFields = [
   { key: 'timeStart',   label: 'Time Start',   fmt: v => formatClock(v) },
   { key: 'timeEnd',     label: 'Time End',     fmt: v => formatClock(v) },
@@ -36,15 +75,10 @@ const detailFields = [
 ];
 
 function refreshDetailView(isNow) {
-  const data      = isNow ? currentEventData : nextEventData;
-  const otherData = isNow ? nextEventData    : currentEventData;
-
-  // Titel‐Überschrift mit farbigem Event‐Namen
-  
   let leftHtml = `
     <h2 class="detail-header">
       Aktuelles Event:
-      <span class="event-title" style="background:${currentEventData?.colour||'#444'};">
+      <span class="event-title" style="background:${currentEventData?.colour || '#444'};">
         ${currentEventData?.title || '--'}
       </span>
     </h2>
@@ -66,11 +100,10 @@ function refreshDetailView(isNow) {
   }
   document.getElementById('eventDetail').innerHTML = leftHtml;
 
-   // rechte Spalte: alle Felder des jeweils anderen Events
-   let rightHtml = `
+  let rightHtml = `
     <h2 class="detail-header">
       Nächstes Event:
-      <span class="event-title" style="background:${nextEventData?.colour||'#444'};">
+      <span class="event-title" style="background:${nextEventData?.colour || '#444'};">
         ${nextEventData?.title || '--'}
       </span>
     </h2>
@@ -100,17 +133,15 @@ btn.addEventListener('click', () => {
   }
   container.classList.toggle('fullscreen');
 });
-uhr.addEventListener('click',   () => container.classList.toggle('fullscreenuhr'));
-auxEl.addEventListener('click', () => container.classList.toggle('swapaux'));
-auxWrapper.addEventListener('click', () => {container.classList.toggle('swapaux');});
+uhr.addEventListener('click',       () => container.classList.toggle('fullscreenuhr'));
+auxEl.addEventListener('click',     () => container.classList.toggle('swapaux'));
+auxWrapper.addEventListener('click', () => container.classList.toggle('swapaux'));
 timerWrapper.addEventListener('click', () => {
   if (container.classList.contains('swapaux')) {
     container.classList.remove('swapaux');
   }
 });
 
-
-// Event-Detail-Ansicht öffnen
 [nowEl, nextEl].forEach(el =>
   el.addEventListener('click', () => {
     const isNow = (el === nowEl);
@@ -119,37 +150,115 @@ timerWrapper.addEventListener('click', () => {
   })
 );
 
-// Close-Button in der Detail-Ansicht
 closeDetailBtn.addEventListener('click', () => {
   container.classList.remove('fullevent');
 });
 
-
+// Projekt-Titel beim Start laden
 fetch('/data/project')
-  .then(r=>r.json())
-  .then(d=>{
-    const pr=d.payload||d;
-    projectEl.textContent=pr.title||pr.name||'--';
+  .then(r => r.json())
+  .then(d => {
+    const pr = d.payload || d;
+    projectEl.textContent = pr.title || pr.name || '--';
   })
-  .catch(()=>{});
+  .catch(() => {});
 
-function leftPad(n) {
-  return String(n).padStart(2,'0');
+function handleOntimePayload(payload) {
+  if ('clock' in payload) {
+    lastClockMs = payload.clock;
+    clockEl.textContent = formatClock(lastClockMs);
+    if (!eventActive) {
+      mainTimerEl.textContent = formatClock(lastClockMs);
+    }
+  }
+
+  if ('eventNow' in payload) {
+    const p = payload.eventNow;
+    if (p != null) {
+      nowEl.textContent = p.title || p.name || '--';
+      eventActive = !!(p.title || p.name);
+      currentEventData = p;
+      if (container.classList.contains('fullevent')) {
+        refreshDetailView(true);
+      }
+      if (!eventActive) {
+        mainTimerEl.textContent = formatClock(lastClockMs);
+        progBar.style.width = '0';
+        mainTimerEl.classList.remove('warning', 'overtime');
+      }
+    } else {
+      nowEl.textContent = '--';
+      eventActive = false;
+      currentEventData = null;
+      mainTimerEl.textContent = formatClock(lastClockMs);
+      progBar.style.width = '0';
+      mainTimerEl.classList.remove('warning', 'overtime');
+    }
+  }
+
+  if ('eventNext' in payload) {
+    const p = payload.eventNext;
+    if (p != null) {
+      nextEl.textContent = p.title || p.name || '--';
+      nextEventData = p;
+      if (container.classList.contains('fullevent')) {
+        refreshDetailView(false);
+      }
+    } else {
+      nextEl.textContent = '--';
+      nextEventData = null;
+    }
+  }
+
+  if ('timer' in payload) {
+    const { current, duration, elapsed, playback } = payload.timer;
+    const displayType = (currentEventData?.timerType || 'none').toLowerCase();
+    timerTypeEl.textContent = displayType;
+
+    if (playback === 'stop' || !eventActive) {
+      mainTimerEl.textContent = formatClock(lastClockMs);
+      progBar.style.width = '0';
+      mainTimerEl.classList.remove('warning', 'overtime');
+    } else if (displayType === 'count-up') {
+      mainTimerEl.textContent = formatTime(elapsed);
+      progBar.style.width = duration > 0 ? `${Math.min(elapsed / duration * 100, 100)}%` : '0';
+      mainTimerEl.classList.remove('warning', 'overtime');
+    } else if (displayType === 'count-down' || displayType === 'none') {
+      const rem = current;
+      const warnThreshold   = currentEventData?.timeWarning ?? 60000;
+      const dangerThreshold = currentEventData?.timeDanger  ?? 0;
+      mainTimerEl.textContent = formatTime(rem);
+      progBar.style.width = duration > 0 ? `${Math.min(elapsed / duration * 100, 100)}%` : '0';
+      mainTimerEl.classList.toggle('warning',  rem <= warnThreshold && rem > dangerThreshold);
+      mainTimerEl.classList.toggle('overtime', rem <= dangerThreshold);
+    } else {
+      mainTimerEl.textContent = formatClock(lastClockMs);
+      progBar.style.width = '0';
+      mainTimerEl.classList.remove('warning', 'overtime');
+    }
+  }
+
+  if ('auxtimer' in payload && payload.auxtimer?.current != null) {
+    auxEl.textContent = formatTime(payload.auxtimer.current);
+  }
 }
 
-// Formatierung eines Timers in Millisekunden
-function formatTime(ms){
+// Helper-Funktionen
+function leftPad(n) {
+  return String(n).padStart(2, '0');
+}
+
+function formatTime(ms) {
   const sign = ms < 0 ? '-' : '';
-  const sec = Math.abs(Math.floor(ms/1000));
-  const h = Math.floor(sec/3600),
-        m = Math.floor(sec/60) % 60,
+  const sec = Math.abs(Math.floor(ms / 1000));
+  const h = Math.floor(sec / 3600),
+        m = Math.floor(sec / 60) % 60,
         s = sec % 60;
   return sign + (h > 0
     ? `${leftPad(h)}:${leftPad(m)}:${leftPad(s)}`
     : `${leftPad(m)}:${leftPad(s)}`);
 }
 
-// Formatierung einer Uhrzeit (ms seit Mitternacht)
 function formatClock(ms) {
   const sec = Math.floor(ms / 1000);
   const h = Math.floor(sec / 3600);
@@ -158,100 +267,12 @@ function formatClock(ms) {
   return `${leftPad(h)}:${leftPad(m)}:${leftPad(s)}`;
 }
 
-ws.addEventListener('open',()=>ws.send(JSON.stringify({type:'poll'})));
-ws.addEventListener('message',({data})=>{
-const msg = JSON.parse(data), p = msg.payload || msg;
-  switch(msg.type){
-    case 'ontime-clock':
-      lastClockMs = typeof p === 'object' && p.current !== undefined ? p.current : p;
-      clockEl.textContent = formatClock(lastClockMs);
-      if(!eventActive){
-        mainTimerEl.textContent = formatClock(lastClockMs);
-      }
-      break;
-      case 'ontime-eventNow':
-        nowEl.textContent    = p.title || p.name || '--';
-        eventActive = !!(p.title || p.name);
-        currentEventData     = p;
-        if (container.classList.contains('fullevent')) {
-          refreshDetailView(true);
-        }
-        if (!eventActive) {
-          mainTimerEl.textContent = formatClock(lastClockMs);
-          progBar.style.width     = '0';
-          mainTimerEl.classList.remove('warning','overtime');
-        }
-      
-        if (container.classList.contains('fullevent')) {
-          refreshDetailView(true);
-        }
-        break;
-      
-      case 'ontime-eventNext':
-        nextEl.textContent   = p.title || p.name || '--';
-        nextEventData        = p;
-        if (container.classList.contains('fullevent')) {
-          refreshDetailView(false);
-        }
-        break;
-      
-      
-      break;
-    case 'ontime-auxtimer1':
-      auxEl.textContent = formatTime(p.current);
-      break;
-      case 'ontime-timer': {
-        const { current, duration, elapsed, clock } = p;
-        // Timer-Type aus Event-Daten
-        const displayType = (currentEventData?.timerType || 'none').toLowerCase();
-        timerTypeEl.textContent = displayType;
-      
-        // 1) Kein Event aktiv → Uhrmodus
-        if (!eventActive) {
-          const ms = clock != null ? clock : current;
-          mainTimerEl.textContent = formatClock(ms);
-          progBar.style.width     = '0';
-          mainTimerEl.classList.remove('warning','overtime');
-          break;
-        }
-      
-        // 2) Count-Up
-        if (displayType === 'count-up') {
-          mainTimerEl.textContent = formatTime(elapsed);
-          progBar.style.width     = duration > 0
-                                   ? `${Math.min(elapsed/duration*100,100)}%`
-                                   : '0';
-          mainTimerEl.classList.remove('warning','overtime');
-          break;
-        }
-      
-        // 3) Count-Down oder 'none' → Runterzählen mit Warn/Danger
-        if (displayType === 'count-down' || displayType === 'none') {
-          const rem            = current;
-          const warnThreshold  = currentEventData?.timeWarning  ?? 60000;
-          const dangerThreshold= currentEventData?.timeDanger   ?? 0;
-          mainTimerEl.textContent = formatTime(rem);
-          progBar.style.width     = duration > 0
-                                   ? `${Math.min(elapsed/duration*100,100)}%`
-                                   : '0';
-          mainTimerEl.classList.toggle('warning', rem <= warnThreshold && rem > dangerThreshold);
-          mainTimerEl.classList.toggle('overtime', rem <= dangerThreshold);
-          break;
-        }
-      
-        // 4) Fallback (z.B. 'clock' während Event) → Uhrmodus
-        {
-          const ms = clock != null ? clock : current;
-          mainTimerEl.textContent = formatClock(ms);
-          progBar.style.width     = '0';
-          mainTimerEl.classList.remove('warning','overtime');
-          break;
-        }
-      }
-      
-
-      
-      
-      
+function getStageHash() {
+  const href = window.location.href;
+  if (!href.includes('getontime.no')) {
+    return '';
   }
-});
+  const hash = href.split('/');
+  const stageHash = hash.at(3);
+  return stageHash ? `/${stageHash}` : '';
+}
